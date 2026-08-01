@@ -1,0 +1,83 @@
+# deploy/docker-compose.prod.yml —— 生产环境部署版（服务器上用）
+#
+# 和开发版 docker-compose.yml 的四个关键区别（每一处都是生产安全/稳定要求）：
+#   ① app(Streamlit 8501) 和 backend(FastAPI 8000) 同时拉起，但端口都只绑
+#      127.0.0.1——访客经 Nginx 访问工作台；API 暂不对外，需要时 Nginx 加
+#      一个 server 块（api.域名 → 127.0.0.1:8000）即可开放；
+#   ② Streamlit 端口只绑到 127.0.0.1——外网无法绕过 Nginx 直接访问 8501，
+#      所有流量必须先过 Nginx（ HTTPS、域名、访问日志都在那一层管）；
+#   ③ postgres / redis 完全不映射宿主机端口——它们只在容器内部网络里
+#      互相访问（app 用服务名 postgres/redis 连接），公网摸不到数据库；
+#   ④ 全部服务 restart: unless-stopped——服务器重启、容器崩溃后自动拉起，
+#      不用你半夜爬起来手动 docker compose up。
+#
+# 用法（在项目根目录执行，--project-directory . 让 build:. 和 env_file:.env
+# 都相对项目根目录解析，不受 compose 文件在子目录的影响）：
+#   docker compose -f deploy/docker-compose.prod.yml --project-directory . up -d --build
+services:
+  app:
+    build: .
+    image: planner-copilot:latest   # 命名镜像：backend 服务复用同一镜像，不重复构建
+    restart: unless-stopped
+    command: uv run streamlit run app.py --server.address 0.0.0.0 --server.port 8501 --server.headless true --browser.gatherUsageStats false
+    env_file: .env
+    environment:
+      # 容器网络里数据库/Redis 用"服务名"访问，不是 localhost
+      DATABASE_URL: postgresql://planner:${DB_PASSWORD:-planner123}@postgres:5432/planner_copilot
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "127.0.0.1:8501:8501"   # 只绑回环口：只许本机的 Nginx 转发进来，公网直连不到
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  backend:
+    # 与 app 同一份镜像（单镜像多容器模式），command 覆盖为 uvicorn 拉起 FastAPI
+    image: planner-copilot:latest
+    restart: unless-stopped
+    command: uv run uvicorn api:app --host 0.0.0.0 --port 8000
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://planner:${DB_PASSWORD:-planner123}@postgres:5432/planner_copilot
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      # 只绑回环口：公网摸不到。将来要对外开放 API 时，
+      # 在 Nginx 里加一个 server 块（api.你的域名.com → 127.0.0.1:8000）即可，
+      # 这个映射不用改
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  postgres:
+    image: pgvector/pgvector:pg16   # 官方镜像，已内置 pgvector 扩展
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: planner_copilot
+      POSTGRES_USER: planner
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-planner123}   # 服务器 .env 里必须改成强密码！
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # 注意：生产版故意不写 ports——数据库不出容器网络，公网零暴露
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U planner -d planner_copilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # 同样不映射端口
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:

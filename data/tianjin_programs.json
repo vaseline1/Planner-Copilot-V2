@@ -1,0 +1,50 @@
+[
+  {
+    "_注意": "以下为原学习方案里的示例数据，仅用于验证代码/格式，不是可直接使用的真实招生信息，请核对当年官方简章后更新",
+    "university_name": "南开大学",
+    "path_type": "强基计划",
+    "province_scope": ["天津", "北京", "上海"],
+    "majors": ["数学与应用数学", "物理学", "化学", "生物科学", "历史学", "哲学", "汉语言文学"],
+    "subject_combo_required": [],
+    "has_physics_requirement": null,
+    "score_requirement_desc": "高考成绩须达到在津本科一批录取线，竞赛通道另有规定（示例数据，请核实当年简章）",
+    "competition_requirement": "五大学科竞赛全国决赛二等奖及以上",
+    "campus_test_ratio": 0.15,
+    "enrollment_tianjin": null,
+    "application_deadline": "通常4月下旬，具体见当年简章",
+    "source_year": 2024,
+    "source_url": ""
+  },
+  {
+    "_注意": "示例数据，请核实当年官方简章后更新",
+    "university_name": "天津大学",
+    "path_type": "强基计划",
+    "province_scope": ["天津", "北京", "上海"],
+    "majors": ["数学与应用数学", "物理学", "化学", "生物科学", "工程力学"],
+    "subject_combo_required": [],
+    "has_physics_requirement": true,
+    "score_requirement_desc": "理工类专业要求含物理，高考成绩须达到在津本科一批录取线（示例数据，请核实当年简章）",
+    "competition_requirement": "五大学科竞赛全国决赛二等奖及以上",
+    "campus_test_ratio": 0.15,
+    "enrollment_tianjin": null,
+    "application_deadline": "通常4月下旬，具体见当年简章",
+    "source_year": 2024,
+    "source_url": ""
+  },
+  {
+    "_注意": "示例数据，请核实当年官方简章后更新",
+    "university_name": "南开大学",
+    "path_type": "综合评价",
+    "province_scope": ["天津"],
+    "majors": ["经济学类", "管理学类", "理学类", "工学类", "文学类"],
+    "subject_combo_required": [],
+    "has_physics_requirement": null,
+    "score_requirement_desc": "天津市预估位次约前8000名，高考成绩占比85%，校测占15%（示例数据，请核实当年简章）",
+    "competition_requirement": null,
+    "campus_test_ratio": 0.15,
+    "enrollment_tianjin": null,
+    "application_deadline": "通常3月下旬至4月，早于强基计划",
+    "source_year": 2024,
+    "source_url": ""
+  }
+]

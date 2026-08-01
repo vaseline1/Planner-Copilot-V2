@@ -1,0 +1,24 @@
+# 防止 macOS 的 .venv（mac 二进制）覆盖容器里刚装好的 Linux .venv，
+# 防止 .env 密钥被打进镜像层——FIXES.md 修复清单第 3 条。
+
+# ── 安全：密钥不进镜像层 ──
+.env
+
+# ── 垃圾/平台不符：Mac 的 .venv 会覆盖容器里刚装好的 Linux .venv ──
+.venv/
+.git/
+__pycache__/
+.pytest_cache/
+.idea/
+.DS_Store
+
+# ── 数据文件按项目需要（保留你原有的规则）──
+*.pdf
+!data/**.example.pdf
+
+# ── 运维文件：容器运行用不到，留在镜像里只是死重 ──
+Dockerfile
+.dockerignore
+docker-compose*.yml
+deploy/
+*.md

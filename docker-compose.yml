@@ -1,0 +1,77 @@
+services:
+  frontend:
+    build: .
+    image: planner-copilot:latest
+    container_name: planner-frontend
+    ports:
+      - "8501:8501"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://planner:${DB_PASSWORD:-planner123}@postgres:5432/planner_copilot
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - planner_net
+
+  backend:
+    image: planner-copilot:latest
+    container_name: planner-backend
+    command: ["uv", "run", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://planner:${DB_PASSWORD:-planner123}@postgres:5432/planner_copilot
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - planner_net
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: planner_copilot
+      POSTGRES_USER: planner
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-planner123}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U planner -d planner_copilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - planner_net
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - planner_net
+
+volumes:
+  postgres_data:
+
+networks:
+  planner_net:
+    driver: bridge

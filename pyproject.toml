@@ -1,0 +1,40 @@
+[project]
+name = "planner-copilot"
+version = "1.0.0"
+description = "PlannerCopilot 完整版 —— 天津升学规划师 AI 助手（对话/工具调用/RAG/记忆/多规划师/部署）"
+requires-python = ">=3.11"
+dependencies = [
+    "openai>=1.30.0",
+    "python-dotenv>=1.0.1",
+    "pydantic>=2.6.0",
+    "sqlmodel>=0.0.16",
+    "psycopg2-binary>=2.9.9",
+    "redis>=5.0.1",
+    "pymupdf>=1.24.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "streamlit>=1.32.0",
+    "gradio>=4.20.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4.4",
+    "pytest-asyncio>=0.23.0",
+    "pyflakes>=3.2.0",
+    "httpx>=0.27.0",
+]
+# 可选：想要 Langfuse 追踪功能时再装，见 observability.py 顶部说明。
+# 不装这个 extra 也完全不影响 Agent 正常工作——observability.py 会自动
+# 探测 .env 里有没有配置 LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY，没配置
+# 就不会真的 import langfuse。
+observability = [
+    "langfuse>=4.0.0",  # 实测验证的是 4.13.0；这一版把 observe/get_client 放在顶层导出，
+                        # 是 OpenTelemetry 架构重写后的新接口，2.x/3.x 的 langfuse.decorators.observe
+                        # 写法和这里不兼容，装错版本 observability.py 会 import 失败
+]
+
+# 平铺脚本合集，不需要把项目自身构建成 wheel——只装 dependencies 列表。
+# 没有这一行 `uv sync` 会因为找不到标准包目录结构而报错退出。
+[tool.uv]
+package = false
