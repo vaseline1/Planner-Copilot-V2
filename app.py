@@ -22,9 +22,18 @@
     不用再 SSH 上服务器敲命令：
     ① 院校项目卡片（data/tianjin_programs.json 的增删改）；
     ② 招生简章 PDF 上传入库（向量库）与已入库文档管理。
+
+六期改造（数据时效 + 批量分析）后的变化：
+    ① 卡片库列表对 source_year 早于当前年份的卡片显示 ⚠️ 复核警示——
+       院校升学路径/名额每年会变，旧卡片不能悄无声息地当真话被检索；
+    ② 侧边栏新增"批量分析"页——一键对名下全部学生并发调用大模型做
+       路径适配分析（复用 batch_analysis.py 的 asyncio 并发逻辑），
+       逐个展示分析结论并汇总 Token 成本报告。
 """
+import asyncio
 import os
 import tempfile
+from datetime import date
 
 import streamlit as st
 from sqlmodel import Session, select
@@ -32,6 +41,7 @@ from sqlmodel import Session, select
 import database
 import memory as memory_module
 from agent_core import PlannerAgent
+from batch_analysis import CostTracker, batch_analyze_students
 from config import ConfigError
 from database import StudentDB, engine
 from enrollment_bot import ConversationState, EnrollmentBot
@@ -42,6 +52,7 @@ from rag_system import delete_document, index_pdf, list_documents
 st.set_page_config(page_title="PlannerCopilot 升学规划师工作台（天津版）", page_icon="🎓", layout="wide")
 
 PLANNER_ID = "planner_001"  # 单机版先固定一个规划师身份；多规划师场景走 api.py
+CURRENT_YEAR = date.today().year  # 卡片"数据年份 < 当前年"时打 ⚠️ 复核警示用
 
 
 @st.cache_resource
@@ -199,14 +210,24 @@ def render_data_admin() -> None:
 
         if not programs:
             st.info("卡片库是空的，先在下方新增第一张")
+        stale_count = sum(1 for p in programs if p.source_year < CURRENT_YEAR)
+        if stale_count:
+            st.warning(
+                f"⚠️ 有 {stale_count} 张卡片的数据年份早于 {CURRENT_YEAR} 年——院校的升学路径、"
+                "名额、分数线每年都可能变化，请对照当年官方简章复核或更新后再用于咨询。"
+            )
         for idx, p in enumerate(programs):
+            is_stale = p.source_year < CURRENT_YEAR
             info_col, edit_col, del_col = st.columns([7, 1, 1])
-            info_col.write(f"**{idx}｜{p.university_name}** · {p.path_type.value} · {p.source_year}年")
+            stale_mark = " ⚠️" if is_stale else ""
+            info_col.write(f"**{idx}｜{p.university_name}** · {p.path_type.value} · {p.source_year}年{stale_mark}")
             info_col.caption(
                 f"专业：{'、'.join(p.majors) if p.majors else '未填'}　"
                 f"天津名额：{p.enrollment_tianjin if p.enrollment_tianjin is not None else '未知'}　"
                 f"报名截止：{p.application_deadline or '未填'}"
             )
+            if is_stale:
+                info_col.caption("⚠️ 该卡片数据已过时，请对照当年最新简章复核")
             if edit_col.button("✏️", key=f"kb_edit_{idx}", help="编辑这张卡片"):
                 st.session_state.kb_editing_index = idx
                 st.rerun()
@@ -283,10 +304,64 @@ def render_data_admin() -> None:
 
 
 # ════════════════════════════════════════════════════════════
+# 批量分析页：一键对全部学生做路径适配分析（复用 batch_analysis.py）
+# ════════════════════════════════════════════════════════════
+
+def render_batch_analysis() -> None:
+    """批量分析页：对当前规划师名下全部学生并发调用大模型做路径适配分析。
+
+    分析逻辑完全复用 batch_analysis.py 的 asyncio 并发实现（AsyncOpenAI +
+    信号量限流），这里只做"取学生列表 → 触发 → 展示结果 + 成本报告"的
+    界面封装。批量分析每个学生消耗一次大模型调用，开始前明确提示。
+    """
+    st.markdown("### 📊 批量路径分析")
+    st.caption(
+        "对名下全部学生档案并发调用大模型，逐一输出路径适配分析（JSON 结论），"
+        "并汇总本次调用的 Token 用量与预估成本。分析结果不写入数据库，仅当场展示。"
+    )
+
+    with Session(engine) as session:
+        students = list(
+            session.exec(select(StudentDB).where(StudentDB.planner_id == PLANNER_ID).order_by(StudentDB.id))
+        )
+
+    st.write(f"当前名下共有 **{len(students)}** 名学生档案")
+    if not students:
+        st.info("暂无学生档案——先在「学生咨询」页建档，再回来跑批量分析")
+        return
+
+    st.caption("每名学生消耗一次大模型调用（约几百 Token），人数多时请注意 API 成本。")
+    if not st.button("🚀 开始批量分析", use_container_width=True):
+        return
+
+    with st.spinner(f"并发分析 {len(students)} 名学生中（受 BATCH_MAX_CONCURRENT 限流）…"):
+        results = asyncio.run(batch_analyze_students(student_ids=[s.id for s in students]))
+
+    tracker = CostTracker()
+    success = 0
+    for r in results:
+        tracker.add_chat_usage(r.get("tokens_used", 0))
+        if r.get("success"):
+            success += 1
+    st.success(f"分析完成：{success}/{len(results)} 成功")
+
+    for r in results:
+        icon = "✅" if r.get("success") else "❌"
+        with st.expander(f"{icon} {r['student_name']}（ID {r['student_id']}）"):
+            if r.get("success"):
+                st.json(r["analysis"])
+            else:
+                st.error(f"分析失败：{r.get('error')}")
+
+    st.markdown("#### 💰 本次成本报告")
+    st.json(tracker.get_report())
+
+
+# ════════════════════════════════════════════════════════════
 # 侧边栏：功能入口切换
 # ════════════════════════════════════════════════════════════
 st.sidebar.markdown("## 🎓 PlannerCopilot")
-page = st.sidebar.radio("功能入口", ["💬 学生咨询", "📚 数据管理"], label_visibility="collapsed")
+page = st.sidebar.radio("功能入口", ["💬 学生咨询", "📚 数据管理", "📊 批量分析"], label_visibility="collapsed")
 st.sidebar.caption("数据管理页用于录入院校卡片和招生简章")
 
 if page == "💬 学生咨询":
@@ -454,8 +529,10 @@ if page == "💬 学生咨询":
         with st.expander("📌 天津政策提示"):
             st.caption("⚠️ 请核查最新简章")
             st.write("· 综合评价：通常3-4月　· 强基计划：通常4月下旬　· 港澳JUPAS：通常3月")
-else:
+elif page == "📚 数据管理":
     render_data_admin()
+else:
+    render_batch_analysis()
 
 st.divider()
 st.caption("PlannerCopilot 天津版 · 使用前请核查最新简章")

@@ -322,11 +322,30 @@ def index_pdf(pdf_path: str, university: str, path_type: str, source_year: int) 
     return stored_count
 
 
+def _prefer_latest_year(chunks: list[dict], top_k: int) -> list[dict]:
+    """同一（院校, 路径）组内只保留最新年份的文本块，再按原相似度顺序取 top_k。
+
+    为什么需要这一步：同一所学校同一路径、不同年份的简章会共存于向量库
+    （doc_id 按"学校+路径+年份"生成，新年简章不会覆盖旧年的）。如果检索
+    不看年份，旧年条款可能因为措辞更接近问题而排在新年条款前面，大模型
+    就会拿着旧简章回答。这里按"组内最新年份优先"过滤——学校某路径一旦
+    录入了新一年的简章，旧年份的块自动不再进入回答上下文（旧数据仍保留
+    在库里可追溯，只是不再被优先检索）。
+    chunks 输入时已按向量距离升序（相似度降序）排列，过滤保持这个顺序。
+    """
+    latest_year: dict[tuple, int] = {}
+    for c in chunks:
+        key = (c["university"], c["path_type"])
+        latest_year[key] = max(latest_year.get(key, 0), c["source_year"])
+    fresh = [c for c in chunks if c["source_year"] == latest_year[(c["university"], c["path_type"])]]
+    return fresh[:top_k]
+
+
 @observe(as_type="retriever", name="retrieve_relevant_chunks")
 def retrieve_relevant_chunks(
     query: str, university: Optional[str] = None, path_type: Optional[str] = None, top_k: int = RAG_TOP_K
 ) -> list[dict]:
-    """检索与查询最相关的文本块（用 pgvector 的余弦距离排序）。
+    """检索与查询最相关的文本块（用 pgvector 的余弦距离排序 + 最新年份优先）。
 
     标成 as_type="retriever"：Langfuse 会把这类 span 在界面上单独归类，
     方便你事后筛选"这次对话到底检索到了什么、相似度排第几"，跟"检索
@@ -335,8 +354,12 @@ def retrieve_relevant_chunks(
     query_embedding = get_embedding(query)
     query_vec_str = str(query_embedding)
 
+    # 先取出比 top_k 更多的候选（默认4倍），给"最新年份优先"过滤留出余量——
+    # 如果只取 top_k 条再过滤掉旧年份，可能一条都不剩。
+    fetch_k = top_k * 4
+
     filters = ["1=1"]
-    params: dict = {"query_vec": query_vec_str, "top_k": top_k}
+    params: dict = {"query_vec": query_vec_str, "fetch_k": fetch_k}
     if university:
         filters.append("university = :university")
         params["university"] = university
@@ -352,13 +375,13 @@ def retrieve_relevant_chunks(
         FROM document_chunks
         WHERE {where_clause}
         ORDER BY embedding <=> CAST(:query_vec AS vector)
-        LIMIT :top_k
+        LIMIT :fetch_k
         """
     )
     with Session(engine) as session:
         rows = session.exec(sql, params=params).fetchall()
 
-    results = [
+    candidates = [
         {
             "university": r.university,
             "path_type": r.path_type,
@@ -370,6 +393,7 @@ def retrieve_relevant_chunks(
         for r in rows
         if r.similarity > RAG_SIMILARITY_THRESHOLD
     ]
+    results = _prefer_latest_year(candidates, top_k)
     update_current_span(
         output={"命中数量": len(results), "最高相似度": results[0]["similarity"] if results else None}
     )
