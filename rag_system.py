@@ -430,3 +430,39 @@ def answer_question(question: str, university: Optional[str] = None, path_type: 
     except Exception as exc:  # noqa: BLE001
         logger.warning("RAG 生成回答失败：%s", exc)
         return f"⚠ 已检索到 {len(chunks)} 条相关简章内容，但生成回答时出错：{exc}"
+
+
+# ══════════════════════════════════════════════════════════════
+# 文档库管理（网页"数据管理"页 / api.py RAG 端点使用）
+# 每份简章 = 同一个 doc_id 下的若干文本块；管理粒度就是"整份文档"。
+# ══════════════════════════════════════════════════════════════
+
+
+def list_documents() -> list[dict]:
+    """列出向量库里已索引的全部简章（按 doc_id 聚合）。
+
+    返回 [{doc_id, university, path_type, source_year, chunk_count}, ...]
+    """
+    sql = text(
+        """
+        SELECT doc_id, university, path_type, source_year, COUNT(*) AS chunk_count
+        FROM document_chunks
+        GROUP BY doc_id, university, path_type, source_year
+        ORDER BY source_year DESC, university, path_type
+        """
+    )
+    with Session(engine) as session:
+        rows = session.exec(sql).all()
+    return [dict(row._mapping) for row in rows]
+
+
+def delete_document(doc_id: str) -> int:
+    """删除某份简章的全部文本块，返回删除的块数（0 = 文档不存在）。"""
+    with Session(engine) as session:
+        result = session.exec(
+            text("DELETE FROM document_chunks WHERE doc_id = :doc_id"), params={"doc_id": doc_id}
+        )
+        session.commit()
+        deleted = result.rowcount
+    logger.info("已删除文档 %s 的 %d 个文本块", doc_id, deleted)
+    return deleted

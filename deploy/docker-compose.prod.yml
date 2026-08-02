@@ -42,6 +42,9 @@ services:
     environment:
       DATABASE_URL: postgresql://planner:${DB_PASSWORD:-planner123}@postgres:5432/planner_copilot
       REDIS_URL: redis://redis:6379/0
+    volumes:
+      # 同上：backend 的知识库/RAG 端点读写同一份 data 目录
+      - ./data:/app/data
     ports:
       # 只绑回环口：公网摸不到。将来要对外开放 API 时，
       # 在 Nginx 里加一个 server 块（api.你的域名.com → 127.0.0.1:8000）即可，

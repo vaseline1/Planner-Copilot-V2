@@ -28,6 +28,9 @@ services:
     environment:
       DATABASE_URL: postgresql://planner:${DB_PASSWORD:-planner123}@postgres:5432/planner_copilot
       REDIS_URL: redis://redis:6379/0
+    volumes:
+      # 同上：backend 的知识库/RAG 端点也读写同一份 data 目录
+      - ./data:/app/data
     depends_on:
       postgres:
         condition: service_healthy

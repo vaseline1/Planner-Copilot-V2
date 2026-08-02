@@ -12,6 +12,7 @@ dependencies = [
     "redis>=5.0.1",
     "pymupdf>=1.24.0",
     "fastapi>=0.110.0",
+    "python-multipart>=0.0.9",  # FastAPI 文件上传（UploadFile/Form）必需，RAG 简章上传端点用
     "uvicorn[standard]>=0.27.0",
     "streamlit>=1.32.0",
     "gradio>=4.20.0",

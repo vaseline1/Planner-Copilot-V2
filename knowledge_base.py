@@ -104,3 +104,48 @@ def get_tianjin_summary() -> dict:
         },
         "港澳升学": {"说明": "天津考生参加 JUPAS 联招或独立申请，通常 3 月报名"},
     }
+
+
+# ══════════════════════════════════════════════════════════════
+# 写入操作（网页"数据管理"页 / api.py 知识库端点使用）
+# 设计说明：
+#   卡片没有单独的自增 ID——JSON 文件本身就是"数组"，用**下标（第几条）**
+#   定位。自用场景没有并发编辑，下标定位简单可靠；每次增删改都整份
+#   重写文件（数据量就几十条，开销可忽略），顺带保证文件永远是合法 JSON。
+# ══════════════════════════════════════════════════════════════
+
+
+def _write_programs(programs: list[UniversityProgram], path: Optional[str] = None) -> None:
+    """把整张卡片列表写回 JSON 文件（覆盖写）。"""
+    kb_path = Path(path or KNOWLEDGE_BASE_PATH)
+    kb_path.parent.mkdir(parents=True, exist_ok=True)
+    data = [p.model_dump(mode="json") for p in programs]
+    kb_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def add_program(program: UniversityProgram, path: Optional[str] = None) -> int:
+    """新增一张院校项目卡片，返回它的下标。"""
+    programs = load_programs(path)
+    programs.append(program)
+    _write_programs(programs, path)
+    return len(programs) - 1
+
+
+def update_program(index: int, program: UniversityProgram, path: Optional[str] = None) -> bool:
+    """整体替换第 index 张卡片。下标越界返回 False。"""
+    programs = load_programs(path)
+    if not 0 <= index < len(programs):
+        return False
+    programs[index] = program
+    _write_programs(programs, path)
+    return True
+
+
+def delete_program(index: int, path: Optional[str] = None) -> bool:
+    """删除第 index 张卡片。下标越界返回 False。"""
+    programs = load_programs(path)
+    if not 0 <= index < len(programs):
+        return False
+    programs.pop(index)
+    _write_programs(programs, path)
+    return True

@@ -20,9 +20,11 @@
 """
 from __future__ import annotations
 
+import os
+import tempfile
 from typing import Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlmodel import Session, select
@@ -40,8 +42,10 @@ from database import (
     update_student,
     wipe_student_data,
 )
+from knowledge_base import add_program, delete_program, load_programs, update_program
 from memory import ConsultationMemory, delete_memory
-from models import ConsultationStage
+from models import ConsultationStage, UniversityProgram
+from rag_system import delete_document, index_pdf, list_documents
 
 app = FastAPI(title="PlannerCopilot API", description="多元升学规划师 AI 助手接口（天津版）", version="1.0.0")
 
@@ -338,3 +342,102 @@ def delete_memory_api(memory_id: int, planner_id: str = Depends(get_planner_id))
     _get_owned_student(student_id, planner_id)
     delete_memory(memory_id, student_id=student_id)
     return {"deleted": True, "memory_id": memory_id}
+
+
+# ══════════════════════════════════════════════════════════════
+# 知识库管理：院校项目卡片（data/tianjin_programs.json）
+# 卡片用"下标"定位（JSON 数组第几条），详见 knowledge_base.py 写入区注释。
+# ══════════════════════════════════════════════════════════════
+
+
+@app.get("/api/kb/programs")
+def list_kb_programs(planner_id: str = Depends(get_planner_id)) -> list[dict]:
+    """列出全部院校项目卡片。"""
+    return [p.model_dump(mode="json") for p in load_programs()]
+
+
+@app.post("/api/kb/programs")
+def add_kb_program(program: UniversityProgram, planner_id: str = Depends(get_planner_id)) -> dict:
+    """新增一张卡片（请求体就是 UniversityProgram 的完整字段）。"""
+    index = add_program(program)
+    return {"index": index, "university_name": program.university_name, "path_type": program.path_type.value}
+
+
+@app.put("/api/kb/programs/{index}")
+def update_kb_program(index: int, program: UniversityProgram, planner_id: str = Depends(get_planner_id)) -> dict:
+    """整体替换第 index 张卡片。"""
+    if not update_program(index, program):
+        raise HTTPException(status_code=404, detail="卡片下标不存在")
+    return {"updated": True, "index": index}
+
+
+@app.delete("/api/kb/programs/{index}")
+def delete_kb_program(index: int, planner_id: str = Depends(get_planner_id)) -> dict:
+    """删除第 index 张卡片。"""
+    if not delete_program(index):
+        raise HTTPException(status_code=404, detail="卡片下标不存在")
+    return {"deleted": True, "index": index}
+
+
+# ══════════════════════════════════════════════════════════════
+# RAG 文档管理：招生简章 PDF 的上传索引 / 列表 / 删除
+# 上传需要 python-multipart（已加入 pyproject 依赖）。
+# ══════════════════════════════════════════════════════════════
+
+
+@app.post("/api/rag/documents")
+async def upload_rag_document(
+    file: UploadFile = File(...),
+    university: str = Form(...),
+    path_type: str = Form(...),
+    source_year: int = Form(...),
+    planner_id: str = Depends(get_planner_id),
+) -> dict:
+    """上传一份招生简章 PDF 并向量化入库。
+
+    multipart 表单四个字段：file（PDF 文件）、university、path_type、source_year。
+    同一份文档（同 university+path_type+year）重复上传会**先清旧块再重建**，
+    不会产生重复数据——这是 index_pdf 自带的幂等设计。
+    """
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="只接受 PDF 文件")
+
+    content = await file.read()
+    if len(content) == 0:
+        raise HTTPException(status_code=400, detail="文件内容为空")
+    if len(content) > 50 * 1024 * 1024:  # 50MB 上限，防恶意大文件撑爆内存
+        raise HTTPException(status_code=400, detail="文件超过 50MB 上限")
+
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+        chunks = index_pdf(tmp_path, university, path_type, source_year)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    if chunks == 0:
+        raise HTTPException(status_code=422, detail="PDF 解析出 0 个文本块（可能是纯扫描件，请先 OCR 再上传）")
+    return {
+        "university": university,
+        "path_type": path_type,
+        "source_year": source_year,
+        "chunks_stored": chunks,
+    }
+
+
+@app.get("/api/rag/documents")
+def list_rag_documents(planner_id: str = Depends(get_planner_id)) -> list[dict]:
+    """列出向量库中已索引的全部简章。"""
+    return list_documents()
+
+
+@app.delete("/api/rag/documents/{doc_id}")
+def delete_rag_document(doc_id: str, planner_id: str = Depends(get_planner_id)) -> dict:
+    """删除某份简章的全部文本块。"""
+    deleted = delete_document(doc_id)
+    if deleted == 0:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    return {"deleted": True, "doc_id": doc_id, "chunks_deleted": deleted}
