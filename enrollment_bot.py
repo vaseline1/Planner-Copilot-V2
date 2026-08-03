@@ -7,8 +7,8 @@
 
 为什么建档要用状态机，而不是让大模型自由对话去问：
     建档信息（姓名/年级/选科/位次……）每一项都有明确的格式要求，
-    状态机能保证"没填对之前不放你去下一步""连续填错3次就终止"这种
-    确定性的流程控制。这类"表单类"交互用状态机比用大模型自由发挥更
+    状态机能保证"没填对之前不放你去下一步"这种确定性的流程控制；
+    连续填错3次不会把用户丢进大模型，而是自动回到建档开头重新循环。这类"表单类"交互用状态机比用大模型自由发挥更
     可靠、更省 Token、也更容易测试——这也是为什么下面每个状态的处理
     函数都能被单独写单元测试，不需要真的联网调用大模型。
 
@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date
 from enum import Enum, auto
 
@@ -59,6 +60,13 @@ COMBO_LIST_STR = "、".join(list(VALID_COMBOS)[:5]) + " 等20种"
 VALID_PATH_TYPES = {p.value for p in PathType}
 PATH_LIST_STR = "、".join(p.value for p in PathType)
 SKIP_WORDS = {"无", "没有", "暂无", "跳过"}
+# 奖项子流程的"结束录入"和"反悔跳回"口令
+AWARD_DONE_WORDS = {"完成", "好了", "录完了", "结束"}
+AWARD_ESCAPE_WORDS = {"没有", "无", "算了", "记错了", "跳过", "暂无"}
+# 兼容中英文逗号、顿号、空格作为字段分隔符
+_AWARD_SPLIT_RE = re.compile(r"[,，、;；\s]+")
+# 年份识别：2010-2039 的四位数，可带"年"字
+_YEAR_RE = re.compile(r"^(20[0-3]\d)年?$")
 
 
 class EnrollmentBot:
@@ -194,9 +202,13 @@ class EnrollmentBot:
             self.retry_count = 0
             self.state = ConversationState.ASK_AWARD_DETAIL
             return (
-                "✅ 竞赛奖项：有\n\n请逐条录入奖项，格式：竞赛名称，获奖等级，年份，学科\n"
-                "例如：全国化学奥林匹克联赛，全国决赛二等奖，2024，化学\n"
-                "每输完一条回车，全部录完输入'完成'："
+                "✅ 竞赛奖项：有\n\n"
+                "请一条一条录入奖项，每条包含 4 项信息，用逗号或顿号隔开：\n"
+                "　① 竞赛名称　② 获奖等级　③ 获奖年份　④ 学科\n"
+                "👉 照着例子写就行：全国化学奥林匹克联赛，全国决赛二等奖，2024，化学\n\n"
+                "· 输完一条回车，我会逐条确认\n"
+                "· 全部录完输入「完成」\n"
+                "· 如果其实没有奖项，输入「没有」即可跳过这一步："
             )
         if user_input in ("没有", "无", "否", "no", "n"):
             self.data["awards"] = []
@@ -209,32 +221,103 @@ class EnrollmentBot:
         return self._retry("请回答'有'或'没有'：")
 
     def _handle_award_detail(self, user_input: str) -> str:
-        """奖项明细录入子流程：每条一行，'完成'结束。录入的每条都立即用
-        CompetitionAward 模型校验（年份范围等），不合格不放行。"""
-        if user_input == "完成":
-            if not self.data["awards"]:
-                return self._retry("还没有录入任何奖项。请按格式录入至少一条，或输入'退出'中止建档：")
+        """奖项明细录入子流程：每条一行，「完成」结束。
+
+        容错设计（真实测试者踩过的坑都在这里）：
+        · 答了"有"却直接说"完成"/"没有"——不卡死，按无奖项继续往下走；
+        · 分隔符兼容逗号、顿号、空格；年份写"2024年"也能认；
+        · 只写了 3 项（常见是漏了获奖等级）——不整条打回，
+          记住已收到的部分，只追问缺的那一项。
+        录入的每条都立即用 CompetitionAward 模型校验（年份范围等），不合格不放行。"""
+        awards: list[CompetitionAward] = self.data["awards"]
+
+        # ── 上一条缺"获奖等级"，本轮输入直接当作等级补录 ──
+        pending = self.data.get("_pending_award")
+        if (
+            pending is not None
+            and user_input not in AWARD_DONE_WORDS
+            and user_input not in AWARD_ESCAPE_WORDS
+        ):
+            return self._complete_pending_award(pending, level=user_input)
+
+        self.data.pop("_pending_award", None)
+
+        # ── 反悔通道：答了"有"又改主意，按无奖项继续 ──
+        if user_input in AWARD_ESCAPE_WORDS or (user_input in AWARD_DONE_WORDS and not awards):
             self.retry_count = 0
             self.state = ConversationState.ASK_MAJOR
-            lines = "；".join(f"{a.competition_name}·{a.level}（{a.year}年）" for a in self.data["awards"])
             return (
-                f"✅ 已录入 {len(self.data['awards'])} 条奖项：{lines}\n\n"
+                "✅ 好的，本步按「无竞赛奖项」继续。\n\n"
                 "第8步：意向专业方向是什么？（可多个，用顿号分隔，如：计算机、金融）\n不确定可输入'待定'："
             )
 
-        parts = [p.strip() for p in user_input.replace("，", ",").split(",") if p.strip()]
+        # ── 正常结束录入（已至少录入一条）──
+        if user_input in AWARD_DONE_WORDS:
+            self.retry_count = 0
+            self.state = ConversationState.ASK_MAJOR
+            lines = "；".join(f"{a.competition_name}·{a.level}（{a.year}年）" for a in awards)
+            return (
+                f"✅ 已录入 {len(awards)} 条奖项：{lines}\n\n"
+                "第8步：意向专业方向是什么？（可多个，用顿号分隔，如：计算机、金融）\n不确定可输入'待定'："
+            )
+
+        parts = [p for p in (s.strip() for s in _AWARD_SPLIT_RE.split(user_input)) if p]
+
+        # ── 常见场景：只写了 3 项且能认出年份 → 缺的是"获奖等级"，只追问这一项 ──
+        if len(parts) == 3:
+            year_idx = next((i for i, p in enumerate(parts) if _YEAR_RE.match(p)), None)
+            if year_idx is not None:
+                year = int(_YEAR_RE.match(parts[year_idx]).group(1))
+                rest = [p for i, p in enumerate(parts) if i != year_idx]
+                # 剩下两项按"名称、学科"理解（名称一般更长、在前）
+                name, subject = rest[0], rest[1]
+                self.data["_pending_award"] = {"name": name, "year": year, "subject": subject}
+                self.retry_count = 0
+                return (
+                    f"📝 已收到：{name}（{year}年，{subject}），还差一项「获奖等级」。\n"
+                    "请直接回复等级即可，例如：全国决赛二等奖 / 省级一等奖："
+                )
+
         if len(parts) != 4:
             return self._retry(
-                "格式应为：竞赛名称，获奖等级，年份，学科（逗号分隔共4项）\n请重新输入本条，或输入'完成'结束录入："
+                "这一条需要 4 项信息：① 竞赛名称 ② 获奖等级 ③ 年份 ④ 学科\n"
+                "👉 例如：全国化学奥林匹克联赛，全国决赛二等奖，2024，化学\n"
+                "请重新输入本条；没有奖项可输入「没有」，录完了输入「完成」："
             )
-        name, level, year_str, subject = parts
+        name, level, year_raw, subject = parts
+        m = _YEAR_RE.match(year_raw)
+        if not m:
+            return self._retry(
+                f"年份「{year_raw}」看不懂，请写成 4 位数字（如 2024）。\n"
+                "请重新输入本条；没有奖项可输入「没有」，录完了输入「完成」："
+            )
         try:
-            award = CompetitionAward(competition_name=name, level=level, year=int(year_str), subject=subject)
-        except Exception:  # noqa: BLE001 —— int() 失败或 Pydantic 校验失败都给同一条提示
-            return self._retry("年份必须是2010-2035之间的数字。请重新输入本条，或输入'完成'结束录入：")
+            award = CompetitionAward(competition_name=name, level=level, year=int(m.group(1)), subject=subject)
+        except Exception:  # noqa: BLE001 —— Pydantic 校验失败（年份越界等）给同一条提示
+            return self._retry(
+                "这条没通过校验（年份需在2010-2035之间）。请重新输入本条，或输入「完成」结束录入："
+            )
+        awards.append(award)
+        self.retry_count = 0
+        return f"✅ 已记录：{award.competition_name}·{award.level}（{award.year}年）\n继续录入下一条，或输入「完成」："
+
+    def _complete_pending_award(self, pending: dict, level: str) -> str:
+        """补录流程：pending 里已有名称/年份/学科，本轮输入作为获奖等级。"""
+        level = level.strip()
+        if not level or len(level) > 30:
+            return self._retry("获奖等级请简短填写，例如：全国决赛二等奖 / 省级一等奖：")
+        try:
+            award = CompetitionAward(
+                competition_name=pending["name"], level=level,
+                year=pending["year"], subject=pending["subject"],
+            )
+        except Exception:  # noqa: BLE001
+            self.data.pop("_pending_award", None)
+            return self._retry("这条没通过校验，请按完整格式重新录入本条（名称，等级，年份，学科）：")
+        self.data.pop("_pending_award", None)
         self.data["awards"].append(award)
         self.retry_count = 0
-        return f"✅ 已记录：{award.competition_name}·{award.level}（{award.year}年）\n继续录入下一条，或输入'完成'："
+        return f"✅ 已记录：{award.competition_name}·{award.level}（{award.year}年）\n继续录入下一条，或输入「完成」："
 
     # ── 第8步：意向专业 ────────────────────────────────────────
     def _handle_major(self, user_input: str) -> str:
@@ -340,10 +423,22 @@ class EnrollmentBot:
             return f"❌ 保存失败：{exc}\n请联系技术支持或重试。"
 
     def _retry(self, prompt: str) -> str:
+        """输入无效的重试控制。
+
+        连续失败 MAX_RETRY 次后不再"终止建档、把用户丢进大模型"——
+        那对规划师来说流程莫名其妙就断了。改为自动清空已填内容、
+        回到第1步重新建档，让流程始终留在状态机里循环。
+        想真正退出仍可随时输入"退出"。"""
         self.retry_count += 1
         if self.retry_count >= self.MAX_RETRY:
-            self.state = ConversationState.ERROR
-            return f"❌ 已重试{self.MAX_RETRY}次，建档流程终止。请重新开始。"
+            planner_id = self.planner_id
+            self.__init__(planner_id=planner_id)
+            self.state = ConversationState.ASK_NAME
+            return (
+                f"❌ 连续{self.MAX_RETRY}次输入无效，已自动回到建档开头。\n"
+                "别担心，我们重新来一遍（输入'退出'可中止建档）。\n\n"
+                "第1步：请输入学生姓名："
+            )
         return f"❌ 输入无效（第{self.retry_count}次）。{prompt}"
 
 

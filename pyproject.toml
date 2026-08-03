@@ -39,3 +39,4 @@ observability = [
 # 没有这一行 `uv sync` 会因为找不到标准包目录结构而报错退出。
 [tool.uv]
 package = false
+

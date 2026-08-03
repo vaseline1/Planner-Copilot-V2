@@ -128,15 +128,72 @@ class TestValidation:
         assert bot.state == ConversationState.ASK_AWARD_DETAIL
         assert "❌" in reply
 
-    def test_award_detail_finish_without_any_award_rejected(self) -> None:
-        """答了'有'却一条都没录就说'完成'——不放行。"""
+    def test_award_detail_finish_without_any_award_continues_gracefully(self) -> None:
+        """答了'有'却一条都没录就说'完成'——不卡死，按无奖项继续（真实测试者踩过的坑）。"""
         bot = EnrollmentBot()
         bot.process("")
         for inp in ["合法姓名", "高三", "物化生", "1000", "650", "无", "有"]:
             bot.process(inp)
         reply = bot.process("完成")
+        assert bot.state == ConversationState.ASK_MAJOR
+        assert bot.data["awards"] == []
+        assert "无竞赛奖项" in reply
+
+    def test_award_detail_escape_words_continue_without_awards(self) -> None:
+        """录入中途反悔：输入'没有/算了'按无奖项继续。"""
+        for word in ("没有", "算了"):
+            bot = EnrollmentBot()
+            bot.process("")
+            for inp in ["合法姓名", "高三", "物化生", "1000", "650", "无", "有"]:
+                bot.process(inp)
+            reply = bot.process(word)
+            assert bot.state == ConversationState.ASK_MAJOR
+            assert bot.data["awards"] == []
+            assert "第8步" in reply
+
+    def test_award_detail_three_parts_missing_level_asks_only_for_level(self) -> None:
+        """3 项输入（漏了获奖等级）不整条打回，只追问等级。"""
+        bot = EnrollmentBot()
+        bot.process("")
+        for inp in ["合法姓名", "高三", "物化生", "1000", "650", "无", "有"]:
+            bot.process(inp)
+        reply = bot.process("化学奥林匹克联赛、2025年、化学")
         assert bot.state == ConversationState.ASK_AWARD_DETAIL
-        assert "❌" in reply
+        assert "获奖等级" in reply
+        assert "📝" in reply
+        reply = bot.process("省级一等奖")
+        assert "已记录" in reply
+        award = bot.data["awards"][0]
+        assert award.competition_name == "化学奥林匹克联赛"
+        assert award.level == "省级一等奖"
+        assert award.year == 2025
+        assert award.subject == "化学"
+
+    def test_award_detail_separator_and_year_variants(self) -> None:
+        """分隔符兼容顿号/空格，年份兼容'2024年'写法。"""
+        bot = EnrollmentBot()
+        bot.process("")
+        for inp in ["合法姓名", "高三", "物化生", "1000", "650", "无", "有"]:
+            bot.process(inp)
+        reply = bot.process("全国化学奥林匹克联赛、全国决赛二等奖、2024年、化学")
+        assert "已记录" in reply
+        assert bot.data["awards"][0].year == 2024
+
+    def test_max_retry_in_award_detail_restarts_enrollment(self) -> None:
+        """奖项子流程连续3次输错 → 自动回到建档开头，不终止、不掉进大模型。"""
+        bot = EnrollmentBot()
+        bot.process("")
+        for inp in ["合法姓名", "高三", "物化生", "1000", "650", "无", "有"]:
+            bot.process(inp)
+        for _ in range(bot.MAX_RETRY):
+            reply = bot.process("这是一条格式完全不对的输入")
+        assert bot.state == ConversationState.ASK_NAME
+        assert "重新" in reply
+        assert "第1步" in reply
+        # 回到开头后可以继续正常建档
+        reply = bot.process("张明")
+        assert "✅" in reply
+        assert bot.state == ConversationState.ASK_GRADE
 
     def test_invalid_path_type_rejected(self) -> None:
         bot = EnrollmentBot()
@@ -149,12 +206,15 @@ class TestValidation:
 
 
 class TestRetryLimit:
-    def test_max_retry_terminates(self) -> None:
+    def test_max_retry_restarts_instead_of_terminating(self) -> None:
+        """连续输错3次不再终止建档，而是自动回到第1步重新循环。"""
         bot = EnrollmentBot()
         bot.process("")
         for _ in range(bot.MAX_RETRY):
-            bot.process("x")  # 一直是无效的单字姓名
-        assert bot.state == ConversationState.ERROR
+            reply = bot.process("x")  # 一直是无效的单字姓名
+        assert bot.state == ConversationState.ASK_NAME
+        assert "第1步" in reply
+        assert bot.data == {}
 
 
 class TestExitCommand:
