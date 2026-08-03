@@ -79,7 +79,7 @@ class EnrollmentBot:
         ...
     """
 
-    MAX_RETRY = 3
+    MAX_RETRY = 8
 
     def __init__(self, planner_id: str = "default") -> None:
         self.state = ConversationState.START
